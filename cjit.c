@@ -154,6 +154,27 @@ size_t assemble_push(uint8_t* buf, uint64_t val)
 	return buf - obuf;
 }
 
+size_t assemble_equals(uint8_t* buf)
+{
+	uint8_t* obuf = buf;
+	
+	buf += assemble_pops(buf, 2);
+	// essentially if the arguments are equal we move -1 to rdx
+	// and push it otherwise we just push zero (rdx is cleared at
+	// the start)
+	const char assembly[] = { 
+		0x48, 0x31, 0xd2,				// xor rdx, rdx
+		0x48, 0xc7, 0xc0, 0xff, 0xff, 0xff, 0xff,	// mov rax, -1
+		0x48, 0x39, 0xf7,				// cmp rdi, rsi
+		0x48, 0x0f, 0x44, 0xd0,				// cmove rdx, rax
+		0x52						// push rdx
+	};
+	memcpy(buf, assembly, sizeof(assembly));
+	buf += sizeof(assembly);
+
+	return buf - obuf;
+}
+
 size_t assemble_token(uint8_t* buf, const char* token)
 {
 	uint8_t* obuf = buf;
@@ -164,7 +185,6 @@ size_t assemble_token(uint8_t* buf, const char* token)
 		*buf++ = 0x01;
 		*buf++ = 0xfe;
 		*buf++ = 0x56; // push rsi
-		return buf - obuf;
 	} else if (strcmp(token, "-") == 0) {
 		// sub
 		buf += assemble_pops(buf, 2);
@@ -172,47 +192,105 @@ size_t assemble_token(uint8_t* buf, const char* token)
 		*buf++ = 0x29;
 		*buf++ = 0xfe;
 		*buf++ = 0x56; // push rsi
-		return buf - obuf;
 	} else if (strcmp(token, ".") == 0) {
-		return assemble_stackcall(buf, &print_int, 1);
+		buf += assemble_stackcall(buf, &print_int, 1);
+	} else if (strcmp(token, "=") == 0) {
+		buf += assemble_equals(buf);
+	} else if (strcmp(token, "not") == 0) {
+		const char assembly[] = {
+			0x58,			// pop rax
+			0x48, 0xf7, 0xd0,	// not rax
+			0x50			// push rax
+		};
+		memcpy(buf, assembly, sizeof(assembly));
+		buf += sizeof(assembly);
 	} else if (strcmp(token, "emit") == 0) {
-		return assemble_stackcall(buf, &emit, 1);	
+		buf += assemble_stackcall(buf, &emit, 1);	
 	} else if (strcmp(token, "cr") == 0) {
-		return assemble_immcall(buf, &newline, 0);
+		buf += assemble_immcall(buf, &newline, 0);
+	} else if (strcmp(token, "dup") == 0) {
+		buf += assemble_pops(buf, 1);
+		*buf++ = 0x57; // push rdi x2
+		*buf++ = 0x57;
 	} else if (valid_int(token)) {
 		long int ival = strtol(token, NULL, 0);
-		return assemble_push(buf, (uint64_t)ival);
-		return 0;
+		buf += assemble_push(buf, (uint64_t)ival);
 	} else {
-		printf("Invalid token!\n");
+		printf("Invalid token '%s'!\n", token);
 		return -1;
 	}
+
+	return buf - obuf;
+}
+
+struct label {
+	char name[32];
+	size_t offset;
+};
+
+size_t assemble_goto(uint8_t* buf, size_t place_to_go, size_t current_off)
+{
+	uint8_t* obuf = buf;
+	const char assembly[] = {
+		0x58, 				// pop rax
+		0x48, 0x83, 0xf8, 0xff,		// cmp rax, -1
+		0x0f, 0x84			// je offset (encoded below)
+	};
+	memcpy(buf, assembly, sizeof(assembly));
+	buf += sizeof(assembly);
+
+	// offset as address is relative to the start of the je immediate offset 
+	uint32_t offset = current_off - place_to_go - 4 - sizeof(assembly);
+	memcpy(buf, &offset, 4);
+	buf += 4;
+
+	return buf - obuf;
 }
 
 size_t assemble(uint8_t* buf, const char* program)
 {
+	uint8_t* obuf = buf;
 	char* progbuf = malloc(strlen(program) + 1);
 	strcpy(progbuf, program);
 	char* token = strtok(progbuf, " ");
 
-	size_t len = 0;
+	struct label labels[32];	
+	int num_labels = 0;
 
 	while (token) {
-		size_t res = assemble_token(buf, token);
-		if (res == -1) {
-			free(progbuf);
-			return -1;
+		if (token[0] == '!') {
+			struct label* label = &labels[num_labels++];
+			assert(strlen(token + 1) < 32);
+			strcpy(label->name, token + 1); 
+			label->offset = buf - obuf;
+		} else if (strncmp(token, "go!", 3) == 0) {
+			size_t offset = -1;
+			for (int i = 0; i < num_labels; i++) {
+				if (strcmp(token + 3, labels[i].name) == 0) {
+					offset = labels[i].offset;
+					break;
+				}
+			}
+			if (offset == -1) {
+				printf("Unknown label '%s'\n", token + 3);
+				return -1;
+			}
+			buf += assemble_goto(buf, buf - obuf, offset);
+		} else {
+			size_t res = assemble_token(buf, token);
+			if (res == -1) {
+				free(progbuf);
+				return -1;
+			}
+			buf += res;
 		}
-		buf += res;
-		len += res;
 		token = strtok(NULL, " ");
 	}
 
 	*buf++ = 0xc3; // ret
-	len++;
 
 	free(progbuf);
-	return len;
+	return buf - obuf;
 }
 
 void mem_dump(void* buffer, size_t len)
@@ -230,9 +308,34 @@ void mem_dump(void* buffer, size_t len)
 
 int main(int argc, char** argv)
 {
-	uint8_t buf[512];
-	size_t len = assemble(buf, "30 20 - . cr");
-	printf("assembled, len: %ld\n", len);
-	mem_dump(buf, len);
-	run(buf, 512);
+	char* linebuf = malloc(4096);
+	bool execute = true;
+
+	printf("Simple C JIT demo. ^D, .q or .quit to exit.\n");
+	while (true) {
+		printf("> ");
+		if (!fgets(linebuf, 512, stdin))
+			break;
+
+		linebuf[strcspn(linebuf, "\n")] = '\0'; // trim trailing newline
+
+		if (strcmp(linebuf, ".q") == 0 || strcmp(linebuf, ".quit") == 0)
+			break;
+
+		if (strcmp(linebuf, ".e") == 0) {
+			execute = !execute;
+			continue;
+		}
+
+		char* program = malloc(4096);
+		size_t length = assemble(program, linebuf);
+		if (length != -1) {
+			mem_dump(program, length);
+			if (execute)
+				run(program, 512);
+		}
+		free(program);
+	}
+	free(linebuf);
 }
+
