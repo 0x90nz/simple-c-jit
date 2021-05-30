@@ -215,16 +215,24 @@ size_t assemble(uint8_t* buf, const char* program)
 	return len;
 }
 
+void mem_dump(void* buffer, size_t len)
+{
+	uint8_t* buf = buffer;
+	size_t i = 0;
+	for (i = 0; i < len; i++) {
+		printf("%02X ", buf[i]);
+		if ((i + 1) % 16 == 0)
+			printf("\n");
+	}
+	if (i % 16 != 0)
+		printf("\n");
+}
+
 int main(int argc, char** argv)
 {
 	uint8_t buf[512];
 	size_t len = assemble(buf, "30 20 - . cr");
 	printf("assembled, len: %ld\n", len);
-	for (size_t i = 0; i < len; i++) {
-		printf("%02X ", buf[i]);
-		if ((i + 1) % 16 == 0)
-			printf("\n");
-	}
-	printf("\n");
+	mem_dump(buf, len);
 	run(buf, 512);
 }
