@@ -167,43 +167,91 @@ size_t assemble_equals(uint8_t* buf)
 	return buf - obuf;
 }
 
+size_t assemble_add(uint8_t* buf)
+{
+	uint8_t* obuf = buf;
+	buf += assemble_pops(buf, 2);
+	const char assembly[] = {
+		0x48, 0x01, 0xfe,	// add rsi, rdi
+		0x56			// push rsi
+	};
+	memcpy(buf, assembly, sizeof(assembly));
+	buf += sizeof(assembly);
+	return buf - obuf;
+}
+
+size_t assemble_sub(uint8_t* buf)
+{
+	uint8_t* obuf = buf;
+	const char assembly[] = {
+		0x48, 0x29, 0xfe,	// sub rsi, rdi
+		0x56			// push rsi
+	};
+	buf += assemble_pops(buf, 2);
+	memcpy(buf, assembly, sizeof(assembly));
+	buf += sizeof(assembly);
+
+	return buf - obuf;
+}
+
+size_t assemble_not(uint8_t* buf)
+{
+	uint8_t* obuf = buf;
+	const char assembly[] = {
+		0x58,			// pop rax
+		0x48, 0xf7, 0xd0, 	// not rax
+		0x50			// push rax
+	};
+	memcpy(buf, assembly, sizeof(assembly));
+	buf += sizeof(assembly);
+	return buf - obuf;
+}
+
+size_t assemble_dup(uint8_t* buf)
+{
+	uint8_t* obuf = buf;
+
+	buf += assemble_pops(buf, 1);
+	*buf++ = 0x57;	// push rdi (x2)
+	*buf++ = 0x57;
+
+	return buf - obuf;
+}
+
+size_t assemble_swap(uint8_t* buf)
+{
+	uint8_t* obuf = buf;
+
+	buf += assemble_pops(buf, 2);
+	*buf++ = 0x57;
+	*buf++ = 0x56;
+
+	return buf - obuf;
+}
+
 size_t assemble_token(uint8_t* buf, const char* token)
 {
 	uint8_t* obuf = buf;
 	if (strcmp(token, "+") == 0) {
-		// add
-		buf += assemble_pops(buf, 2);
-		*buf++ = 0x48; // add rsi, rdi
-		*buf++ = 0x01;
-		*buf++ = 0xfe;
-		*buf++ = 0x56; // push rsi
+		buf += assemble_add(buf);
 	} else if (strcmp(token, "-") == 0) {
-		// sub
-		buf += assemble_pops(buf, 2);
-		*buf++ = 0x48; // sub rsi, rdi
-		*buf++ = 0x29;
-		*buf++ = 0xfe;
-		*buf++ = 0x56; // push rsi
+		buf += assemble_sub(buf);
 	} else if (strcmp(token, ".") == 0) {
 		buf += assemble_stackcall(buf, &print_int, 1);
 	} else if (strcmp(token, "=") == 0) {
 		buf += assemble_equals(buf);
 	} else if (strcmp(token, "not") == 0) {
-		const char assembly[] = {
-			0x58,			// pop rax
-			0x48, 0xf7, 0xd0,	// not rax
-			0x50			// push rax
-		};
-		memcpy(buf, assembly, sizeof(assembly));
-		buf += sizeof(assembly);
+		buf += assemble_not(buf);
 	} else if (strcmp(token, "emit") == 0) {
 		buf += assemble_stackcall(buf, &emit, 1);	
 	} else if (strcmp(token, "cr") == 0) {
 		buf += assemble_stackcall(buf, &newline, 0);
 	} else if (strcmp(token, "dup") == 0) {
+		buf += assemble_dup(buf);
+	} else if (strcmp(token, "drop") == 0) {
 		buf += assemble_pops(buf, 1);
-		*buf++ = 0x57; // push rdi x2
-		*buf++ = 0x57;
+	} else if (strcmp(token, "swap") == 0) {
+		buf += assemble_swap(buf);
 	} else if (valid_int(token)) {
 		long int ival = strtol(token, NULL, 0);
 		buf += assemble_push(buf, (uint64_t)ival);
