@@ -69,7 +69,7 @@ void emit(unsigned char c)
 bool valid_int(const char* token) {
 	char* endptr;
 	long int ival = strtol(token, &endptr, 0);
-	return endptr != token && ival >= INT_MIN && ival <= INT_MAX;
+	return endptr != token;
 }
 
 // pop arguments for something off the stack in x86_64 calling convention order
@@ -92,7 +92,24 @@ size_t assemble_stackcall(uint8_t* buf, void* func, int num_args)
 	assert(num_args <= 6);
 	uint8_t* obuf = buf;
 
+	// the prologue and epilogue aren't a function prologue and epilogue
+	// but more a guard for calls into C functions. these expect the stack
+	// to be aligned on a 16-byte boundary, but we don't guarantee that internally
+	// so set that up here.
+	const char prologue[] = {
+		0x55,			// push rbp
+		0x48, 0x89, 0xe5,	// mov rbp, rsp
+		0x48, 0x83, 0xe4, 0xf0	// and rsp, ~0x0f
+	};
+	const char epilogue[] = {
+		0x48, 0x89, 0xec,	// mov rsp, rbp
+		0x5d			// pop rbp
+	};
+
 	buf += assemble_pops(buf, num_args);	
+
+	memcpy(buf, prologue, sizeof(prologue));
+	buf += sizeof(prologue);
 
 	uint64_t fn_int = (uint64_t)func;
 	// mov rax, fn_int
@@ -105,40 +122,8 @@ size_t assemble_stackcall(uint8_t* buf, void* func, int num_args)
 	*buf++ = 0xff; 
 	*buf++ = 0xd0;
 
-	return buf - obuf;
-}
-
-// call with immediate arguments
-size_t assemble_immcall(uint8_t* buf, void* func, int num_args, ...)
-{
-	assert(num_args <= 6);
-
-	va_list ap;
-	va_start(ap, num_args);
-
-	uint8_t* obuf = buf;
-	uint64_t fn_int = (uint64_t)func;
-		
-	// arguments as per x86_64 sysv calling convention
-	uint16_t prefixes[] = { 0xbf48, 0xbe48, 0xba48, 0xb948, 0xb849, 0xb949 };
-	for (int i = 0; i < num_args; i++) {
-		uint64_t ival = va_arg(ap, uint64_t);
-		memcpy(buf, &prefixes[i], 2);
-		buf += 2;
-		memcpy(buf, &ival, 8);
-		buf += 8;
-	}
-
-	// mov rax, fn_int
-	*buf++ = 0x48;
-	*buf++ = 0xb8;
-	memcpy(buf, &fn_int, 8);
-	buf += 8;
-
-	*buf++ = 0xff; // call rax
-	*buf++ = 0xd0;
-
-	va_end(ap);
+	memcpy(buf, epilogue, sizeof(epilogue));
+	buf += sizeof(epilogue);
 
 	return buf - obuf;
 }
@@ -146,11 +131,18 @@ size_t assemble_immcall(uint8_t* buf, void* func, int num_args, ...)
 size_t assemble_push(uint8_t* buf, uint64_t val)
 {
 	uint8_t* obuf = buf;
-	*buf++ = 0x48; // mov rax, val
-	*buf++ = 0xb8;
-	memcpy(buf, &val, 8);
-	buf += 8;
-	*buf++ = 0x50; // push rax
+	if (val <= UINT32_MAX) {
+		*buf++ = 0x68;
+		uint32_t u32val = val;
+		memcpy(buf, &u32val, 4);
+		buf += 4;
+	} else {
+		*buf++ = 0x48; // mov rax, val
+		*buf++ = 0xb8;
+		memcpy(buf, &val, 8);
+		buf += 8;
+		*buf++ = 0x50; // push rax
+	}
 	return buf - obuf;
 }
 
@@ -207,7 +199,7 @@ size_t assemble_token(uint8_t* buf, const char* token)
 	} else if (strcmp(token, "emit") == 0) {
 		buf += assemble_stackcall(buf, &emit, 1);	
 	} else if (strcmp(token, "cr") == 0) {
-		buf += assemble_immcall(buf, &newline, 0);
+		buf += assemble_stackcall(buf, &newline, 0);
 	} else if (strcmp(token, "dup") == 0) {
 		buf += assemble_pops(buf, 1);
 		*buf++ = 0x57; // push rdi x2
@@ -257,6 +249,18 @@ size_t assemble(uint8_t* buf, const char* program)
 	struct label labels[32];	
 	int num_labels = 0;
 
+	const char prologue[] = {
+		0x55,			// push rbp
+		0x48, 0x89, 0xe5,	// mov rbp, rsp
+	};
+	const char epilogue[] = {
+		0x48, 0x89, 0xec,	// mov rsp, rbp
+		0x5d			// pop rbp
+	};
+
+	memcpy(buf, prologue, sizeof(prologue));
+	buf += sizeof(prologue);
+
 	while (token) {
 		if (token[0] == '!') {
 			struct label* label = &labels[num_labels++];
@@ -287,6 +291,8 @@ size_t assemble(uint8_t* buf, const char* program)
 		token = strtok(NULL, " ");
 	}
 
+	memcpy(buf, epilogue, sizeof(epilogue));
+	buf += sizeof(epilogue);
 	*buf++ = 0xc3; // ret
 
 	free(progbuf);
